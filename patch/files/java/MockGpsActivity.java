@@ -123,7 +123,7 @@ public class MockGpsActivity extends AbstractActionBarActivity {
     }
 
     @Override
-    protected void onPause() {
+    public void onPause() {
         ui.removeCallbacks(refresh);
         super.onPause();
     }
