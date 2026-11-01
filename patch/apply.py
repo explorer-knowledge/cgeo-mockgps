@@ -141,6 +141,12 @@ def main():
          'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
          "mockgps-compress")
 
+    # release uses a fixed FileProvider authority that the official c:geo already owns -> INSTALL_FAILED_CONFLICTING_PROVIDER
+    edit(res_dir / "values/strings_not_translatable.xml",
+         'name="file_provider_authority">org.cgeo.fileprovider<',
+         'name="file_provider_authority">org.cgeo.mockgps.fileprovider<',
+         "org.cgeo.mockgps.fileprovider")
+
     print("Patch applied OK.")
 
 
