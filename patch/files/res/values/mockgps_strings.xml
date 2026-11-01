@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mockgps_menu_title" translatable="false">Mock GPS</string>
+</resources>

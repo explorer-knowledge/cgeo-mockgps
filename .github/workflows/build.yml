@@ -1,0 +1,140 @@
+name: Build patched c:geo
+
+on:
+  schedule:
+    - cron: "23 3 * * *"        # daily: rebuild only if c:geo / Mock-Location / the patch changed
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if nothing changed"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["patch/**", ".github/workflows/build.yml"]
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout this repo (patch + workflow)
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream versions and decide whether a build is needed
+        id: up
+        run: |
+          set -euo pipefail
+          CGEO_SHA=$(git ls-remote https://github.com/cgeo/cgeo.git refs/heads/master | cut -f1)
+          MOCK_SHA=$(git ls-remote https://github.com/warren-bank/Android-Mock-Location.git refs/heads/service | cut -f1)
+          [ -n "$CGEO_SHA" ] && [ -n "$MOCK_SHA" ] || { echo "could not resolve upstream heads"; exit 1; }
+          PATCH_HASH=$(find patch -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-7)
+          TAG="cgeo-${CGEO_SHA:0:8}-mock-${MOCK_SHA:0:7}-p${PATCH_HASH}"
+          SKIP=false
+          if [ "${{ inputs.force }}" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then SKIP=true; fi
+          {
+            echo "cgeo_sha=$CGEO_SHA"
+            echo "mock_sha=$MOCK_SHA"
+            echo "tag=$TAG"
+            echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG skip=$SKIP"
+
+      - name: Keep the scheduled workflow alive (GitHub disables schedules after 60 idle days)
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/enable" || true
+
+      - name: Checkout c:geo
+        if: steps.up.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: cgeo/cgeo
+          ref: ${{ steps.up.outputs.cgeo_sha }}
+          path: cgeo
+          fetch-depth: 50
+
+      - name: Checkout Android-Mock-Location
+        if: steps.up.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: warren-bank/Android-Mock-Location
+          ref: ${{ steps.up.outputs.mock_sha }}
+          path: mock
+
+      - name: Apply patch
+        if: steps.up.outputs.skip != 'true'
+        run: python3 patch/apply.py --cgeo cgeo --mock mock
+
+      - uses: actions/setup-java@v4
+        if: steps.up.outputs.skip != 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.up.outputs.skip != 'true'
+
+      # A stable signing key is needed so each new APK can be installed over the previous one.
+      # Priority: repo secret KEYSTORE_B64 > key stored on the 'signing' branch > generate once and store there.
+      - name: Signing key
+        if: steps.up.outputs.skip != 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.android
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+          elif git ls-remote --exit-code --heads origin signing >/dev/null 2>&1; then
+            git fetch -q origin signing
+            git show origin/signing:debug.keystore > ~/.android/debug.keystore
+          else
+            keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android -keypass android \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            d=$(mktemp -d)
+            cp ~/.android/debug.keystore "$d/"
+            (cd "$d" && git init -q -b signing && git add debug.keystore \
+              && git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "debug signing key" \
+              && git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" signing)
+          fi
+
+      - name: Build APK
+        if: steps.up.outputs.skip != 'true'
+        working-directory: cgeo
+        run: ./gradlew assembleBasicDebug --no-daemon --stacktrace
+
+      - name: Publish release
+        if: steps.up.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          APK=$(ls cgeo/main/build/outputs/apk/basic/debug/*.apk | head -n1)
+          cp "$APK" cgeo-mockgps.apk
+          gh release create "${{ steps.up.outputs.tag }}" cgeo-mockgps.apk \
+            --title "c:geo + Mock GPS (${{ steps.up.outputs.tag }})" \
+            --notes "Built from cgeo/cgeo@${{ steps.up.outputs.cgeo_sha }} and warren-bank/Android-Mock-Location@${{ steps.up.outputs.mock_sha }}. Package: cgeo.geocaching.mockgps" \
+            --latest
+          # keep only the 5 newest releases
+          gh release list --limit 100 --json tagName,createdAt \
+            -q 'sort_by(.createdAt) | reverse | .[5:] | .[].tagName' \
+            | while read -r t; do gh release delete "$t" --cleanup-tag -y; done
+
+      - name: Open an issue if the patch or build broke
+        if: failure()
+        run: |
+          T="Build failed for c:geo ${{ steps.up.outputs.cgeo_sha }}"
+          N=$(gh issue list --state open --search "\"$T\" in:title" --json number -q length)
+          if [ "$N" = "0" ]; then
+            gh issue create --title "$T" \
+              --body "The patch or build failed. Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
