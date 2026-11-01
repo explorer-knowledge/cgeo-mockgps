@@ -125,6 +125,14 @@ def main():
          'applicationIdSuffix = ".mockgps"',
          'applicationIdSuffix = ".mockgps"')
 
+    # CI builds the release type (R8 + resource shrinking, no LeakCanary); give it the same app id and arm64 only
+    edit(main_dir / "build.gradle",
+         "        release {\n            signingConfig = signingConfigs.release\n            manifestPlaceholders",
+         "        release {\n            // mockgps-release\n            applicationIdSuffix = \".mockgps\"\n"
+         "            ndk { abiFilters \"arm64-v8a\" }\n"
+         "            signingConfig = signingConfigs.release\n            manifestPlaceholders",
+         "mockgps-release")
+
     print("Patch applied OK.")
 
 

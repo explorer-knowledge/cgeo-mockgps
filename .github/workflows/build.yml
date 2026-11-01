@@ -112,13 +112,17 @@ jobs:
       - name: Build APK
         if: steps.up.outputs.skip != 'true'
         working-directory: cgeo
-        run: ./gradlew assembleBasicDebug --no-daemon --stacktrace
+        run: |
+          # release = minified + shrunk, no LeakCanary; signed with the stable key from the previous step
+          printf 'key.store=%s/.android/debug.keystore\nkey.store.password=android\nkey.alias=androiddebugkey\nkey.alias.password=android\n' "$HOME" > private.properties
+          ./gradlew assembleBasicRelease --no-daemon --stacktrace
+          ls -l main/build/outputs/apk/basic/release/*.apk
 
       - name: Publish release
         if: steps.up.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          APK=$(ls cgeo/main/build/outputs/apk/basic/debug/*.apk | head -n1)
+          APK=$(ls cgeo/main/build/outputs/apk/basic/release/*.apk | head -n1)
           cp "$APK" cgeo-mockgps.apk
           gh release create "${{ steps.up.outputs.tag }}" cgeo-mockgps.apk \
             --title "c:geo + Mock GPS (${{ steps.up.outputs.tag }})" \
