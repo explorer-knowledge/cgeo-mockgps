@@ -133,6 +133,14 @@ def main():
          "            signingConfig = signingConfigs.release\n            manifestPlaceholders",
          "mockgps-release")
 
+    # upstream stores .so uncompressed in release (libbergamot is 9 MB raw); compress them like debug/nightly do
+    edit(main_dir / "build.gradle",
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("release")) { // mockgps-compress\n'
+         '    packaging.jniLibs.useLegacyPackaging.set(true)\n}\n'
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
+         "mockgps-compress")
+
     print("Patch applied OK.")
 
 
