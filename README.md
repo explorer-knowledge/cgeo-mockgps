@@ -15,14 +15,18 @@ A daily workflow checks the heads of cgeo/cgeo (`master`) and Android-Mock-Locat
 patch changed, it rebuilds and publishes a new release (last 5 kept). If upstream changes break an anchor in
 `apply.py`, the build fails and the workflow opens an issue instead of publishing a half-patched app.
 
-## What you get (c:geo main menu > Mock GPS)
-* fixed position (type, paste `lat, lon` / `geo:` URI, or pick a favourite)
-* favourites: save, use as fixed / route start / route destination, delete
-* route creator: two points -> road route (OSRM online, c:geo BRouter, or straight line) -> simulated drive at your speed,
-  then holds the destination. Foreground service with a Stop button.
+## What you get (inside the c:geo map, no separate screen)
+Long-press an empty spot on the map, or a cache / waypoint (needs Settings > Map > long-tap + route menu enabled):
+* **Mock location here** - fixes your position there
+* **Mock route: start here** - remembers a start point
+* **Mock drive here** - drives from the remembered start (or your current position) to this point, then holds it.
+  Road route from c:geo's BRouter (offline tiles), else OSRM online, else straight line. Speed follows c:geo's
+  routing mode: car 50, bike 15, walk 5 km/h.
+* **Stop mock location** - also available as Stop in the notification
 
-On the phone: Developer options > **Select mock location app > c:geo (mockgps)**. The APK installs next to the normal
-c:geo (package `cgeo.geocaching.mockgps`).
+Your own caches, waypoints and user-defined caches serve as favourites.
+On the phone: Developer options > **Select mock location app > c:geo**. The APK installs next to the normal
+c:geo (package `cgeo.geocaching.mockgps`). Release build (R8), arm64 only, without the Bergamot offline translator.
 
 ## Notes
 * Signing: the first run generates a key and stores it on a `signing` branch so updates install over each other.

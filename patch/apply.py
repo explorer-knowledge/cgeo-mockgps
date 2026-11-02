@@ -6,7 +6,7 @@ Applies the Mock-GPS patch to a fresh c:geo checkout.
 
 * copies MockLocationProvider.java verbatim from warren-bank's repo (package line rewritten)
 * adds our own new classes from patch/files
-* makes a few small anchored edits to existing c:geo files (manifest, menu, MainActivity, build.gradle)
+* makes a few small anchored edits to existing c:geo files (manifest, map long-press menus, build.gradle)
 
 Every edit is idempotent and FAILS LOUDLY if its anchor disappeared upstream, so a broken patch
 never silently produces a build without the feature.
@@ -46,8 +46,9 @@ def main():
     main_dir = a.cgeo / "main"
     java_dir = main_dir / "src/main/java/cgeo/geocaching"
     res_dir = main_dir / "src/main/res"
-    for p in (main_dir / "AndroidManifest.xml", java_dir / "MainActivity.java",
-              res_dir / "menu/main_activity_options.xml", main_dir / "build.gradle"):
+    map_utils = java_dir / "maps/MapUtils.java"
+    translate = java_dir / "utils/offlinetranslate/TranslateAccessor.java"
+    for p in (main_dir / "AndroidManifest.xml", main_dir / "build.gradle", map_utils, translate):
         if not p.exists():
             die(f"expected c:geo file missing: {p}")
 
@@ -78,9 +79,6 @@ def main():
     for f in sorted((FILES / "java").glob("*.java")):
         shutil.copy(f, target / f.name)
         print("  added", f.name)
-    for f in sorted((FILES / "res/values").glob("*.xml")):
-        shutil.copy(f, res_dir / "values" / f.name)
-        print("  added res/values/" + f.name)
 
     # 3. small edits to existing c:geo files --------------------------------
     manifest = main_dir / "AndroidManifest.xml"
@@ -92,38 +90,24 @@ def main():
     edit(manifest,
          "    </application>",
          '        <!-- Mock GPS patch -->\n'
-         '        <activity\n'
-         '            android:name=".mockgps.MockGpsActivity"\n'
-         '            android:label="Mock GPS"\n'
-         '            android:exported="false" />\n'
          '        <service\n'
          '            android:name=".mockgps.MockGpsService"\n'
          '            android:exported="false"\n'
          '            android:foregroundServiceType="location" />\n'
          "    </application>",
-         ".mockgps.MockGpsActivity")
+         ".mockgps.MockGpsService")
 
-    edit(res_dir / "menu/main_activity_options.xml",
-         '    <item\n        android:id="@+id/menu_wherigo"',
-         '    <item\n'
-         '        android:id="@+id/menu_mockgps"\n'
-         '        android:icon="@drawable/ic_menu_goto"\n'
-         '        android:title="@string/mockgps_menu_title"/>\n\n'
-         '    <item\n        android:id="@+id/menu_wherigo"',
-         "menu_mockgps")
-
-    edit(java_dir / "MainActivity.java",
-         "} else if (id == R.id.menu_wherigo) {",
-         "} else if (id == R.id.menu_mockgps) {\n"
-         "            startActivity(new Intent(this, cgeo.geocaching.mockgps.MockGpsActivity.class));\n"
-         "        } else if (id == R.id.menu_wherigo) {",
-         "menu_mockgps")
-
-    # own application id so it installs next to the official c:geo and official dev builds
-    edit(main_dir / "build.gradle",
-         'applicationIdSuffix = ".developer"',
-         'applicationIdSuffix = ".mockgps"',
-         'applicationIdSuffix = ".mockgps"')
+    # mock entries in the map long-press menus (empty map spot, and caches/waypoints = c:geo's own "favourites")
+    edit(map_utils,
+         "        return SimplePopupMenu.of(activity)\n                .setMenuContent(R.menu.map_longclick)",
+         "        return cgeo.geocaching.mockgps.MockGps.addMenuItems(activity, longClickGeopoint, SimplePopupMenu.of(activity))\n"
+         "                .setMenuContent(R.menu.map_longclick)",
+         "MockGps.addMenuItems(activity, longClickGeopoint")
+    edit(map_utils,
+         "R.drawable.elevation);\n        }\n    }\n",
+         "R.drawable.elevation);\n        }\n"
+         "        cgeo.geocaching.mockgps.MockGps.addMenuItems(activity, routeItem.getPoint(), menu);\n    }\n",
+         "MockGps.addMenuItems(activity, routeItem.getPoint()")
 
     # CI builds the release type (R8 + resource shrinking, no LeakCanary); give it the same app id and arm64 only
     edit(main_dir / "build.gradle",
@@ -133,11 +117,13 @@ def main():
          "            signingConfig = signingConfigs.release\n            manifestPlaceholders",
          "mockgps-release")
 
-    # upstream stores .so uncompressed in release (libbergamot is 9 MB raw); compress them like debug/nightly do
+    # upstream stores .so uncompressed in release; compress them like debug/nightly do, and drop the
+    # 9 MB Bergamot offline translator (-4 MB APK, same content as the official 14 MB foss APK)
     edit(main_dir / "build.gradle",
          'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
          'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("release")) { // mockgps-compress\n'
-         '    packaging.jniLibs.useLegacyPackaging.set(true)\n}\n'
+         '    packaging.jniLibs.useLegacyPackaging.set(true)\n'
+         '    packaging.jniLibs.excludes.add("**/libbergamot-sys.so")\n}\n'
          'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
          "mockgps-compress")
 
@@ -146,6 +132,12 @@ def main():
          'name="file_provider_authority">org.cgeo.fileprovider<',
          'name="file_provider_authority">org.cgeo.mockgps.fileprovider<',
          "org.cgeo.mockgps.fileprovider")
+
+    # without the .so, NativeLib throws UnsatisfiedLinkError (an Error); catch it so c:geo falls back to "no translator"
+    edit(translate,
+         '} catch (final Exception e) {\n                Log.e("TranslateAccessor: Could not initialize Bergamot", e);',
+         '} catch (final Throwable e) {\n                Log.e("TranslateAccessor: Could not initialize Bergamot", e);',
+         "catch (final Throwable e) {\n                Log.e(\"TranslateAccessor: Could not initialize Bergamot\"")
 
     print("Patch applied OK.")
 
