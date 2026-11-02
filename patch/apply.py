@@ -149,6 +149,13 @@ def main():
          "            signingConfig = signingConfigs.release\n            manifestPlaceholders",
          "mockgps-release")
 
+    # c:geo release branches still use proguard-android.txt (-dontoptimize); master switched to the optimize config
+    # in 92bbb18e. Without it the APK has ~60% more classes (+1.3 MB). No-op on master (marker already there).
+    edit(main_dir / "build.gradle",
+         "        proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-project.txt'",
+         "        proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-project.txt'",
+         "proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')")
+
     # upstream stores .so uncompressed in release; compress them like debug/nightly do, and drop the
     # 9 MB Bergamot offline translator (-4 MB APK, same content as the official 14 MB foss APK)
     edit(main_dir / "build.gradle",
