@@ -3,7 +3,7 @@
 I made this because I needed it. I kept switching between two separate apps: [c:geo](https://github.com/cgeo/cgeo)
 for geocaching and maps, and [Android-Mock-Location](https://github.com/warren-bank/Android-Mock-Location) for
 faking my position. Both are great at what they do, so I wondered why not combine them. This project builds c:geo
-with mock location built right into its map and navigation menus.
+with mock location built right into its map and navigation menus.It is all done by claude.
 
 All the real work belongs to the creators of those two apps; this repo only glues them together (see
 [Credits](#credits)). Nothing is forked or vendored: GitHub Actions clones both upstream repos fresh, applies
