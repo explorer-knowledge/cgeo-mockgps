@@ -2,7 +2,7 @@ name: Build patched c:geo
 
 on:
   schedule:
-    - cron: "23 3 * * *"        # daily: rebuild only if c:geo / Mock-Location / the patch changed
+    - cron: "23 3 * * *"        # daily check: builds only when c:geo published a new release
   workflow_dispatch:
     inputs:
       force:
@@ -32,18 +32,22 @@ jobs:
       - name: Checkout this repo (patch + workflow)
         uses: actions/checkout@v4
 
+      # Build against c:geo's latest published release, not master, so commits to c:geo don't trigger builds.
+      # Mock-Location is not in the tag: its changes alone never trigger a build (picked up with the next one).
       - name: Resolve upstream versions and decide whether a build is needed
         id: up
         run: |
           set -euo pipefail
-          CGEO_SHA=$(git ls-remote https://github.com/cgeo/cgeo.git refs/heads/master | cut -f1)
+          CGEO_TAG=$(gh api repos/cgeo/cgeo/releases/latest -q .tag_name)
+          CGEO_SHA=$(git ls-remote https://github.com/cgeo/cgeo.git "refs/tags/$CGEO_TAG" "refs/tags/$CGEO_TAG^{}" | sort -k2 | tail -n1 | cut -f1)  # annotated tag: last line is the ^{} commit
           MOCK_SHA=$(git ls-remote https://github.com/warren-bank/Android-Mock-Location.git refs/heads/service | cut -f1)
-          [ -n "$CGEO_SHA" ] && [ -n "$MOCK_SHA" ] || { echo "could not resolve upstream heads"; exit 1; }
+          [ -n "$CGEO_TAG" ] && [ -n "$CGEO_SHA" ] && [ -n "$MOCK_SHA" ] || { echo "could not resolve upstream versions"; exit 1; }
           PATCH_HASH=$(find patch -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-7)
-          TAG="cgeo-${CGEO_SHA:0:8}-mock-${MOCK_SHA:0:7}-p${PATCH_HASH}"
+          TAG="cgeo-${CGEO_TAG}-p${PATCH_HASH}"
           SKIP=false
           if [ "${{ inputs.force }}" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then SKIP=true; fi
           {
+            echo "cgeo_tag=$CGEO_TAG"
             echo "cgeo_sha=$CGEO_SHA"
             echo "mock_sha=$MOCK_SHA"
             echo "tag=$TAG"
@@ -59,7 +63,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: cgeo/cgeo
-          ref: ${{ steps.up.outputs.cgeo_sha }}
+          ref: ${{ steps.up.outputs.cgeo_tag }}
           path: cgeo
           fetch-depth: 50
 
@@ -126,7 +130,7 @@ jobs:
           cp "$APK" cgeo-mockgps.apk
           gh release create "${{ steps.up.outputs.tag }}" cgeo-mockgps.apk \
             --title "c:geo + Mock GPS (${{ steps.up.outputs.tag }})" \
-            --notes "Built from cgeo/cgeo@${{ steps.up.outputs.cgeo_sha }} and warren-bank/Android-Mock-Location@${{ steps.up.outputs.mock_sha }}. Package: cgeo.geocaching.mockgps" \
+            --notes "Built from c:geo release ${{ steps.up.outputs.cgeo_tag }} (cgeo/cgeo@${{ steps.up.outputs.cgeo_sha }}) and warren-bank/Android-Mock-Location@${{ steps.up.outputs.mock_sha }}. Package: cgeo.geocaching.mockgps" \
             --latest
           # keep only the 5 newest releases
           gh release list --limit 100 --json tagName,createdAt \
@@ -136,7 +140,7 @@ jobs:
       - name: Open an issue if the patch or build broke
         if: failure()
         run: |
-          T="Build failed for c:geo ${{ steps.up.outputs.cgeo_sha }}"
+          T="Build failed for c:geo ${{ steps.up.outputs.cgeo_tag }}"
           N=$(gh issue list --state open --search "\"$T\" in:title" --json number -q length)
           if [ "$N" = "0" ]; then
             gh issue create --title "$T" \

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string translatable="false" name="mockgps_here">Mock location here</string>
+    <string translatable="false" name="mockgps_drive_here">Mock drive here</string>
+    <string translatable="false" name="pref_navigation_menu_mock_here">navigationMockHere</string>
+    <string translatable="false" name="pref_navigation_menu_mock_drive">navigationMockDrive</string>
+</resources>

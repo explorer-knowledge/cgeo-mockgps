@@ -48,7 +48,10 @@ def main():
     res_dir = main_dir / "src/main/res"
     map_utils = java_dir / "maps/MapUtils.java"
     translate = java_dir / "utils/offlinetranslate/TranslateAccessor.java"
-    for p in (main_dir / "AndroidManifest.xml", main_dir / "build.gradle", map_utils, translate):
+    navi_dir = java_dir / "apps/navi"
+    navi_prefs = res_dir / "xml/preferences_navigation_navigation.xml"
+    for p in (main_dir / "AndroidManifest.xml", main_dir / "build.gradle", map_utils, translate,
+              navi_dir / "NavigationAppFactory.java", navi_prefs):
         if not p.exists():
             die(f"expected c:geo file missing: {p}")
 
@@ -68,7 +71,6 @@ def main():
         die("MockLocationProvider API changed upstream - MockGpsService must be adapted")
     header = (
         "// Copied from https://github.com/warren-bank/Android-Mock-Location (GPL-2.0, (c) Warren Bank)\n"
-        "// which in turn copied it from https://github.com/mcastillof/FakeTraveler\n"
         "// Only the package line was changed by the patch script.\n"
     )
     (target / "MockLocationProvider.java").write_text(
@@ -79,6 +81,12 @@ def main():
     for f in sorted((FILES / "java").glob("*.java")):
         shutil.copy(f, target / f.name)
         print("  added", f.name)
+    for f in sorted((FILES / "navi").glob("*.java")):  # must live in apps.navi: AbstractPointNavigationApp is package-private
+        shutil.copy(f, navi_dir / f.name)
+        print("  added apps/navi/" + f.name)
+    for f in sorted((FILES / "res/values").glob("*.xml")):
+        shutil.copy(f, res_dir / "values" / f.name)
+        print("  added res/values/" + f.name)
 
     # 3. small edits to existing c:geo files --------------------------------
     manifest = main_dir / "AndroidManifest.xml"
@@ -108,6 +116,30 @@ def main():
          "R.drawable.elevation);\n        }\n"
          "        cgeo.geocaching.mockgps.MockGps.addMenuItems(activity, routeItem.getPoint(), menu);\n    }\n",
          "MockGps.addMenuItems(activity, routeItem.getPoint()")
+
+    # mock entries in c:geo's navigation chooser: reaches every stored cache/waypoint (details, list, compass)
+    edit(navi_dir / "NavigationAppFactory.java",
+         "CRUISER(new CruiserNavigationApp(), 28, R.string.pref_navigation_menu_cruiser);",
+         "CRUISER(new CruiserNavigationApp(), 28, R.string.pref_navigation_menu_cruiser),\n"
+         "        MOCK_HERE(new MockNavigationApp(false), 90, R.string.pref_navigation_menu_mock_here),\n"
+         "        MOCK_DRIVE(new MockNavigationApp(true), 91, R.string.pref_navigation_menu_mock_drive);",
+         "MOCK_HERE(new MockNavigationApp(false)")
+    edit(navi_prefs,
+         "</PreferenceScreen>",
+         '    <CheckBoxPreference\n'
+         '        android:defaultValue="true"\n'
+         '        android:enabled="false"\n'
+         '        android:key="@string/pref_navigation_menu_mock_here"\n'
+         '        android:title="@string/mockgps_here"\n'
+         '        app:iconSpaceReserved="false" />\n'
+         '    <CheckBoxPreference\n'
+         '        android:defaultValue="true"\n'
+         '        android:enabled="false"\n'
+         '        android:key="@string/pref_navigation_menu_mock_drive"\n'
+         '        android:title="@string/mockgps_drive_here"\n'
+         '        app:iconSpaceReserved="false" />\n'
+         "</PreferenceScreen>",
+         "pref_navigation_menu_mock_here")
 
     # CI builds the release type (R8 + resource shrinking, no LeakCanary); give it the same app id and arm64 only
     edit(main_dir / "build.gradle",

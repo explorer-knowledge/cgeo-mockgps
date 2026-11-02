@@ -9,6 +9,7 @@ import cgeo.geocaching.sensors.GeoData;
 import cgeo.geocaching.sensors.LocationDataProvider;
 import cgeo.geocaching.settings.Settings;
 import cgeo.geocaching.ui.ViewUtils;
+import cgeo.geocaching.ui.dialog.Dialogs;
 import cgeo.geocaching.ui.dialog.SimplePopupMenu;
 import cgeo.geocaching.utils.AndroidRxUtils;
 import cgeo.geocaching.utils.Log;
@@ -16,6 +17,8 @@ import cgeo.geocaching.utils.Log;
 import android.app.Activity;
 import android.content.Context;
 import android.os.SystemClock;
+import android.text.InputType;
+import android.widget.EditText;
 
 import java.util.Locale;
 
@@ -39,13 +42,15 @@ public final class MockGps {
             ViewUtils.showShortToast(ctx, "Mock route start set - long-press the destination");
         });
         menu.addMenuItem(routeStart == null ? "Mock drive here" : "Mock drive here from route start", R.drawable.ic_menu_navigate, i -> drive(ctx, p));
+        menu.addMenuItem(String.format(Locale.US, "Mock speed: %.0f km/h", speedKmh(ctx)), R.drawable.ic_menu_edit, i -> askSpeed(activity));
         if (MockGpsService.running) {
             menu.addMenuItem("Stop mock location", R.drawable.ic_menu_mylocation_off, i -> MockGpsService.stop(ctx));
         }
         return menu;
     }
 
-    private static void drive(final Context ctx, final Geopoint dest) {
+    /** also used by the "Mock drive here" navigation app */
+    public static void drive(final Context ctx, final Geopoint dest) {
         final GeoData geo = LocationDataProvider.getInstance().currentGeo();
         if (routeStart == null && geo == GeoData.DUMMY_LOCATION) { // no fix yet: dummy sits at Paris / last map centre
             ViewUtils.showShortToast(ctx, "No current position - set a mock route start first");
@@ -54,11 +59,49 @@ public final class MockGps {
         final Geopoint start = routeStart != null ? routeStart : geo.getCoords();
         routeStart = null;
         final RoutingMode mode = Settings.getRoutingMode();
-        final double kmh = mode == RoutingMode.CAR ? 50 : mode == RoutingMode.BIKE ? 15 : 5;
+        final double kmh = speedKmh(ctx);
         ViewUtils.showShortToast(ctx, "Building mock route...");
         AndroidRxUtils.andThenOnUi(AndroidRxUtils.networkScheduler,
                 () -> route(mode, start, dest),
                 path -> MockGpsService.startTrip(ctx, path, kmh));
+    }
+
+    /** speed chosen via "Mock speed", else a default for c:geo's routing mode (car 50, bike 15, else 5) */
+    private static double speedKmh(final Context ctx) {
+        final RoutingMode mode = Settings.getRoutingMode();
+        final float def = mode == RoutingMode.CAR ? 50 : mode == RoutingMode.BIKE ? 15 : 5;
+        return ctx.getSharedPreferences("mockgps", Context.MODE_PRIVATE).getFloat("speed_kmh", def);
+    }
+
+    /** also changes the speed of a drive that is already running */
+    private static void askSpeed(final Activity activity) {
+        final Context ctx = activity.getApplicationContext();
+        final EditText input = new EditText(activity);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        input.setText(String.format(Locale.US, "%.0f", speedKmh(ctx)));
+        input.setSelectAllOnFocus(true);
+        Dialogs.newBuilder(activity)
+                .setTitle("Mock drive speed (km/h)")
+                .setView(input)
+                .setPositiveButton(android.R.string.ok, (d, w) -> {
+                    final float kmh;
+                    try {
+                        kmh = Float.parseFloat(input.getText().toString().trim().replace(',', '.'));
+                    } catch (final NumberFormatException e) {
+                        ViewUtils.showShortToast(ctx, "Invalid speed");
+                        return;
+                    }
+                    if (kmh < 1 || kmh > 1000) {
+                        ViewUtils.showShortToast(ctx, "Speed must be 1-1000 km/h");
+                        return;
+                    }
+                    ctx.getSharedPreferences("mockgps", Context.MODE_PRIVATE).edit().putFloat("speed_kmh", kmh).apply();
+                    if (MockGpsService.running) {
+                        MockGpsService.setSpeed(ctx, kmh);
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     /** flattened lat0, lon0, lat1, lon1, ...; never throws, falls back to a straight line */

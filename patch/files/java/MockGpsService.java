@@ -35,6 +35,7 @@ public class MockGpsService extends Service {
     private static final String ACTION_FIXED = "cgeo.geocaching.mockgps.FIXED";
     private static final String ACTION_TRIP = "cgeo.geocaching.mockgps.TRIP";
     private static final String ACTION_STOP = "cgeo.geocaching.mockgps.STOP";
+    private static final String ACTION_SPEED = "cgeo.geocaching.mockgps.SPEED";
     private static final String EXTRA_LAT = "lat";
     private static final String EXTRA_LON = "lon";
     private static final String EXTRA_SPEED_KMH = "speed_kmh";
@@ -65,6 +66,8 @@ public class MockGpsService extends Service {
     private int seg;
     private double tripSpeedMps;
     private long tripStartMs;
+    /** metres already driven at tripStartMs (non-zero after a speed change) */
+    private double tripBaseMeters;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -91,6 +94,10 @@ public class MockGpsService extends Service {
         start(ctx, new Intent(ctx, MockGpsService.class).setAction(ACTION_TRIP).putExtra(EXTRA_SPEED_KMH, kmh));
     }
 
+    public static void setSpeed(final Context ctx, final double kmh) {
+        ctx.startService(new Intent(ctx, MockGpsService.class).setAction(ACTION_SPEED).putExtra(EXTRA_SPEED_KMH, kmh));
+    }
+
     public static void stop(final Context ctx) {
         ctx.startService(new Intent(ctx, MockGpsService.class).setAction(ACTION_STOP));
     }
@@ -114,6 +121,16 @@ public class MockGpsService extends Service {
     public int onStartCommand(final Intent intent, final int flags, final int startId) {
         if (intent == null || ACTION_STOP.equals(intent.getAction())) {
             stopEverything();
+            return START_NOT_STICKY;
+        }
+        if (ACTION_SPEED.equals(intent.getAction())) {
+            if (!running) { // raced with a stop: don't leave an idle started service behind
+                stopSelf();
+            } else if (tripMode) { // re-base so the position does not jump
+                tripBaseMeters = travelled();
+                tripStartMs = System.currentTimeMillis();
+                tripSpeedMps = Math.max(1.0, intent.getDoubleExtra(EXTRA_SPEED_KMH, 50.0)) / 3.6;
+            }
             return START_NOT_STICKY;
         }
         final String text;
@@ -161,6 +178,7 @@ public class MockGpsService extends Service {
             cumMeters[i] = cumMeters[i - 1] + r[0];
         }
         seg = 1;
+        tripBaseMeters = 0;
         tripSpeedMps = mps;
         tripStartMs = System.currentTimeMillis();
         tripMode = true;
@@ -170,7 +188,7 @@ public class MockGpsService extends Service {
 
     private void step() {
         if (tripMode) {
-            final double travelled = (System.currentTimeMillis() - tripStartMs) / 1000.0 * tripSpeedMps;
+            final double travelled = travelled();
             final int n = path.length / 2;
             if (travelled >= cumMeters[n - 1]) {
                 lat = path[2 * (n - 1)];
@@ -199,6 +217,10 @@ public class MockGpsService extends Service {
         if (gms != null) {
             gms.setMockLocation(f);
         }
+    }
+
+    private double travelled() {
+        return tripBaseMeters + (System.currentTimeMillis() - tripStartMs) / 1000.0 * tripSpeedMps;
     }
 
     private Location push(final MockLocationProvider provider, final String name, final float accuracy) {
@@ -279,9 +301,21 @@ public class MockGpsService extends Service {
             gms.setMockMode(false); // otherwise fused location stays frozen at the last mock fix
             gms = null;
         }
-        for (final MockLocationProvider p : new MockLocationProvider[]{gps, net, fused}) {
-            if (p != null) {
-                p.shutdown();
+        // Last fix stamped 10 min old: c:geo prefers any GPS fix younger than 30 s over network fixes, and Android keeps
+        // the last fix as "last known" - a fresh mock fix would block the real position after stopping.
+        final String[] names = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, "fused"};
+        final MockLocationProvider[] providers = {gps, net, fused};
+        for (int i = 0; i < providers.length; i++) {
+            if (providers[i] != null) {
+                try {
+                    final Location l = MockLocationProvider.getLocation(names[i], lat, lon);
+                    l.setTime(System.currentTimeMillis() - 10 * 60 * 1000L);
+                    l.setAccuracy(5000f);
+                    lm.setTestProviderLocation(names[i], l);
+                } catch (final RuntimeException ignored) {
+                    // provider already gone - nothing to clear
+                }
+                providers[i].shutdown();
             }
         }
         gps = null;
