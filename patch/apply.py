@@ -6,7 +6,7 @@ Applies the Mock-GPS patch to a fresh c:geo checkout.
 
 * copies MockLocationProvider.java verbatim from warren-bank's repo (package line rewritten)
 * adds our own new classes from patch/files
-* makes a few small anchored edits to existing c:geo files (manifest, menu, MainActivity, build.gradle)
+* makes a few small anchored edits to existing c:geo files (manifest, map long-press menus, build.gradle)
 
 Every edit is idempotent and FAILS LOUDLY if its anchor disappeared upstream, so a broken patch
 never silently produces a build without the feature.
@@ -16,11 +16,26 @@ import pathlib
 import shutil
 import sys
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from patchlib import die, edit  # noqa: E402
-
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 FILES = HERE / "files"
+
+
+def die(msg):
+    print(f"PATCH FAILED: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def edit(path, anchor, replacement, marker, count_must_be=1):
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        print(f"  already patched: {path.name} ({marker})")
+        return
+    found = text.count(anchor)
+    if found != count_must_be:
+        die(f"anchor found {found}x (expected {count_must_be}x) in {path}:\n---\n{anchor}\n---")
+    path.write_text(text.replace(anchor, replacement), encoding="utf-8")
+    print(f"  patched: {path.name} ({marker})")
 
 
 def main():
@@ -33,8 +48,12 @@ def main():
     main_dir = a.cgeo / "main"
     java_dir = main_dir / "src/main/java/cgeo/geocaching"
     res_dir = main_dir / "src/main/res"
-    for p in (main_dir / "AndroidManifest.xml", java_dir / "MainActivity.java",
-              res_dir / "menu/main_activity_options.xml", main_dir / "build.gradle"):
+    map_utils = java_dir / "maps/MapUtils.java"
+    translate = java_dir / "utils/offlinetranslate/TranslateAccessor.java"
+    navi_dir = java_dir / "apps/navi"
+    navi_prefs = res_dir / "xml/preferences_navigation_navigation.xml"
+    for p in (main_dir / "AndroidManifest.xml", main_dir / "build.gradle", map_utils, translate,
+              navi_dir / "NavigationAppFactory.java", navi_prefs):
         if not p.exists():
             die(f"expected c:geo file missing: {p}")
 
@@ -54,7 +73,6 @@ def main():
         die("MockLocationProvider API changed upstream - MockGpsService must be adapted")
     header = (
         "// Copied from https://github.com/warren-bank/Android-Mock-Location (GPL-2.0, (c) Warren Bank)\n"
-        "// which in turn copied it from https://github.com/mcastillof/FakeTraveler\n"
         "// Only the package line was changed by the patch script.\n"
     )
     (target / "MockLocationProvider.java").write_text(
@@ -65,6 +83,9 @@ def main():
     for f in sorted((FILES / "java").glob("*.java")):
         shutil.copy(f, target / f.name)
         print("  added", f.name)
+    for f in sorted((FILES / "navi").glob("*.java")):  # must live in apps.navi: AbstractPointNavigationApp is package-private
+        shutil.copy(f, navi_dir / f.name)
+        print("  added apps/navi/" + f.name)
     for f in sorted((FILES / "res/values").glob("*.xml")):
         shutil.copy(f, res_dir / "values" / f.name)
         print("  added res/values/" + f.name)
@@ -79,40 +100,87 @@ def main():
     edit(manifest,
          "    </application>",
          '        <!-- Mock GPS patch -->\n'
-         '        <activity\n'
-         '            android:name=".mockgps.MockGpsActivity"\n'
-         '            android:label="Mock GPS"\n'
-         '            android:exported="false" />\n'
          '        <service\n'
          '            android:name=".mockgps.MockGpsService"\n'
          '            android:exported="false"\n'
          '            android:foregroundServiceType="location" />\n'
          "    </application>",
-         ".mockgps.MockGpsActivity")
+         ".mockgps.MockGpsService")
 
-    edit(res_dir / "menu/main_activity_options.xml",
-         '    <item\n        android:id="@+id/menu_wherigo"',
-         '    <item\n'
-         '        android:id="@+id/menu_mockgps"\n'
-         '        android:icon="@drawable/ic_menu_goto"\n'
-         '        android:title="@string/mockgps_menu_title"/>\n\n'
-         '    <item\n        android:id="@+id/menu_wherigo"',
-         "menu_mockgps")
+    # mock entries in the map long-press menus (empty map spot, and caches/waypoints = c:geo's own "favourites")
+    edit(map_utils,
+         "        return SimplePopupMenu.of(activity)\n                .setMenuContent(R.menu.map_longclick)",
+         "        return cgeo.geocaching.mockgps.MockGps.addMenuItems(activity, longClickGeopoint, SimplePopupMenu.of(activity))\n"
+         "                .setMenuContent(R.menu.map_longclick)",
+         "MockGps.addMenuItems(activity, longClickGeopoint")
+    edit(map_utils,
+         "R.drawable.elevation);\n        }\n    }\n",
+         "R.drawable.elevation);\n        }\n"
+         "        cgeo.geocaching.mockgps.MockGps.addMenuItems(activity, routeItem.getPoint(), menu);\n    }\n",
+         "MockGps.addMenuItems(activity, routeItem.getPoint()")
 
-    edit(java_dir / "MainActivity.java",
-         "} else if (id == R.id.menu_wherigo) {",
-         "} else if (id == R.id.menu_mockgps) {\n"
-         "            startActivity(new Intent(this, cgeo.geocaching.mockgps.MockGpsActivity.class));\n"
-         "        } else if (id == R.id.menu_wherigo) {",
-         "menu_mockgps")
+    # mock entries in c:geo's navigation chooser: reaches every stored cache/waypoint (details, list, compass)
+    edit(navi_dir / "NavigationAppFactory.java",
+         "CRUISER(new CruiserNavigationApp(), 28, R.string.pref_navigation_menu_cruiser);",
+         "CRUISER(new CruiserNavigationApp(), 28, R.string.pref_navigation_menu_cruiser),\n"
+         "        MOCK_HERE(new MockNavigationApp(false), 90, R.string.pref_navigation_menu_mock_here),\n"
+         "        MOCK_DRIVE(new MockNavigationApp(true), 91, R.string.pref_navigation_menu_mock_drive);",
+         "MOCK_HERE(new MockNavigationApp(false)")
+    edit(navi_prefs,
+         "</PreferenceScreen>",
+         '    <CheckBoxPreference\n'
+         '        android:defaultValue="true"\n'
+         '        android:enabled="false"\n'
+         '        android:key="@string/pref_navigation_menu_mock_here"\n'
+         '        android:title="@string/mockgps_here"\n'
+         '        app:iconSpaceReserved="false" />\n'
+         '    <CheckBoxPreference\n'
+         '        android:defaultValue="true"\n'
+         '        android:enabled="false"\n'
+         '        android:key="@string/pref_navigation_menu_mock_drive"\n'
+         '        android:title="@string/mockgps_drive_here"\n'
+         '        app:iconSpaceReserved="false" />\n'
+         "</PreferenceScreen>",
+         "pref_navigation_menu_mock_here")
 
-    # own application id so it installs next to the official c:geo and official dev builds
+    # CI builds the release type (R8 + resource shrinking, no LeakCanary); give it the same app id and arm64 only
     edit(main_dir / "build.gradle",
-         'applicationIdSuffix = ".developer"',
-         'applicationIdSuffix = ".mockgps"',
-         'applicationIdSuffix = ".mockgps"')
+         "        release {\n            signingConfig = signingConfigs.release\n            manifestPlaceholders",
+         "        release {\n            // mockgps-release\n            applicationIdSuffix = \".mockgps\"\n"
+         "            ndk { abiFilters \"arm64-v8a\" }\n"
+         "            signingConfig = signingConfigs.release\n            manifestPlaceholders",
+         "mockgps-release")
 
-    print("Mock GPS patch applied OK.")
+    # c:geo release branches still use proguard-android.txt (-dontoptimize); master switched to the optimize config
+    # in 92bbb18e. Without it the APK has ~60% more classes (+1.3 MB). No-op on master (marker already there).
+    edit(main_dir / "build.gradle",
+         "        proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-project.txt'",
+         "        proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-project.txt'",
+         "proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')")
+
+    # upstream stores .so uncompressed in release; compress them like debug/nightly do, and drop the
+    # 9 MB Bergamot offline translator (-4 MB APK, same content as the official 14 MB foss APK)
+    edit(main_dir / "build.gradle",
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("release")) { // mockgps-compress\n'
+         '    packaging.jniLibs.useLegacyPackaging.set(true)\n'
+         '    packaging.jniLibs.excludes.add("**/libbergamot-sys.so")\n}\n'
+         'androidComponentsExt.onVariants(androidComponentsExt.selector().withBuildType("nightly")) {',
+         "mockgps-compress")
+
+    # release uses a fixed FileProvider authority that the official c:geo already owns -> INSTALL_FAILED_CONFLICTING_PROVIDER
+    edit(res_dir / "values/strings_not_translatable.xml",
+         'name="file_provider_authority">org.cgeo.fileprovider<',
+         'name="file_provider_authority">org.cgeo.mockgps.fileprovider<',
+         "org.cgeo.mockgps.fileprovider")
+
+    # without the .so, NativeLib throws UnsatisfiedLinkError (an Error); catch it so c:geo falls back to "no translator"
+    edit(translate,
+         '} catch (final Exception e) {\n                Log.e("TranslateAccessor: Could not initialize Bergamot", e);',
+         '} catch (final Throwable e) {\n                Log.e("TranslateAccessor: Could not initialize Bergamot", e);',
+         "catch (final Throwable e) {\n                Log.e(\"TranslateAccessor: Could not initialize Bergamot\"")
+
+    print("Patch applied OK.")
 
     if a.wmaps:
         import gmapswv
