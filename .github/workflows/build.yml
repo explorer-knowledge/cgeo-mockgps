@@ -2,13 +2,17 @@ name: Build patched c:geo
 
 on:
   schedule:
-    - cron: "23 3 * * *"        # daily check: builds only when c:geo published a new release
+    - cron: "23 */6 * * *"      # every 6 hours: rebuilds only when a NEW upstream release tag (or the patch) appeared
   workflow_dispatch:
     inputs:
       force:
         description: "Rebuild even if nothing changed"
         type: boolean
         default: false
+      cgeo_ref:
+        description: "Optional: build this c:geo branch/tag (e.g. master) instead of the latest market_* release"
+        type: string
+        default: ""
   push:
     branches: [main]
     paths: ["patch/**", ".github/workflows/build.yml"]
@@ -32,24 +36,26 @@ jobs:
       - name: Checkout this repo (patch + workflow)
         uses: actions/checkout@v4
 
-      # Build against c:geo's latest published release, not master, so commits to c:geo don't trigger builds.
-      # Mock-Location is not in the tag: its changes alone never trigger a build (picked up with the next one).
-      - name: Resolve upstream versions and decide whether a build is needed
+      - name: Resolve latest upstream releases and decide whether a build is needed
         id: up
         run: |
           set -euo pipefail
-          CGEO_TAG=$(gh api repos/cgeo/cgeo/releases/latest -q .tag_name)
-          CGEO_SHA=$(git ls-remote https://github.com/cgeo/cgeo.git "refs/tags/$CGEO_TAG" "refs/tags/$CGEO_TAG^{}" | sort -k2 | tail -n1 | cut -f1)  # annotated tag: last line is the ^{} commit
-          MOCK_SHA=$(git ls-remote https://github.com/warren-bank/Android-Mock-Location.git refs/heads/service | cut -f1)
-          [ -n "$CGEO_TAG" ] && [ -n "$CGEO_SHA" ] && [ -n "$MOCK_SHA" ] || { echo "could not resolve upstream versions"; exit 1; }
-          PATCH_HASH=$(find patch -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-7)
-          TAG="cgeo-${CGEO_TAG}-p${PATCH_HASH}"
+          latest_tag() { git ls-remote --tags --refs "$1" "$2" | sed 's#.*refs/tags/##' | sort -V | tail -n1; }
+          CGEO_REF="${{ inputs.cgeo_ref }}"
+          CUSTOM=false
+          if [ -n "$CGEO_REF" ]; then CUSTOM=true; else CGEO_REF=$(latest_tag https://github.com/cgeo/cgeo.git 'market_*'); fi
+          WMAPS_REF=$(latest_tag https://github.com/woheller69/maps.git 'V*')
+          MOCK_REF=$(latest_tag https://github.com/warren-bank/Android-Mock-Location.git 'service/v*')
+          for v in "$CGEO_REF" "$WMAPS_REF" "$MOCK_REF"; do [ -n "$v" ] || { echo "could not resolve an upstream release tag"; exit 1; }; done
+          PATCH_HASH=$(find patch -type f -not -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-7)
+          TAG="cgeo-${CGEO_REF//\//-}-gmwv-${WMAPS_REF}-mock-${MOCK_REF//\//-}-p${PATCH_HASH}"
+          [ "$CUSTOM" = "true" ] && TAG="${TAG}-run${GITHUB_RUN_NUMBER}"
           SKIP=false
           if [ "${{ inputs.force }}" != "true" ] && gh release view "$TAG" >/dev/null 2>&1; then SKIP=true; fi
           {
-            echo "cgeo_tag=$CGEO_TAG"
-            echo "cgeo_sha=$CGEO_SHA"
-            echo "mock_sha=$MOCK_SHA"
+            echo "cgeo_ref=$CGEO_REF"
+            echo "wmaps_ref=$WMAPS_REF"
+            echo "mock_ref=$MOCK_REF"
             echo "tag=$TAG"
             echo "skip=$SKIP"
           } >> "$GITHUB_OUTPUT"
@@ -63,7 +69,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: cgeo/cgeo
-          ref: ${{ steps.up.outputs.cgeo_tag }}
+          ref: ${{ steps.up.outputs.cgeo_ref }}
           path: cgeo
           fetch-depth: 50
 
@@ -72,12 +78,20 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: warren-bank/Android-Mock-Location
-          ref: ${{ steps.up.outputs.mock_sha }}
+          ref: ${{ steps.up.outputs.mock_ref }}
           path: mock
+
+      - name: Checkout woheller69/maps (Google Maps WebView)
+        if: steps.up.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: woheller69/maps
+          ref: ${{ steps.up.outputs.wmaps_ref }}
+          path: wmaps
 
       - name: Apply patch
         if: steps.up.outputs.skip != 'true'
-        run: python3 patch/apply.py --cgeo cgeo --mock mock
+        run: python3 patch/apply.py --cgeo cgeo --mock mock --wmaps wmaps
 
       - uses: actions/setup-java@v4
         if: steps.up.outputs.skip != 'true'
@@ -116,21 +130,17 @@ jobs:
       - name: Build APK
         if: steps.up.outputs.skip != 'true'
         working-directory: cgeo
-        run: |
-          # release = minified + shrunk, no LeakCanary; signed with the stable key from the previous step
-          printf 'key.store=%s/.android/debug.keystore\nkey.store.password=android\nkey.alias=androiddebugkey\nkey.alias.password=android\n' "$HOME" > private.properties
-          ./gradlew assembleBasicRelease --no-daemon --stacktrace
-          ls -l main/build/outputs/apk/basic/release/*.apk
+        run: ./gradlew assembleBasicDebug --no-daemon --stacktrace
 
       - name: Publish release
         if: steps.up.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          APK=$(ls cgeo/main/build/outputs/apk/basic/release/*.apk | head -n1)
+          APK=$(ls cgeo/main/build/outputs/apk/basic/debug/*.apk | head -n1)
           cp "$APK" cgeo-mockgps.apk
           gh release create "${{ steps.up.outputs.tag }}" cgeo-mockgps.apk \
             --title "c:geo + Mock GPS (${{ steps.up.outputs.tag }})" \
-            --notes "Built from c:geo release ${{ steps.up.outputs.cgeo_tag }} (cgeo/cgeo@${{ steps.up.outputs.cgeo_sha }}) and warren-bank/Android-Mock-Location@${{ steps.up.outputs.mock_sha }}. Package: cgeo.geocaching.mockgps" \
+            --notes "c:geo ${{ steps.up.outputs.cgeo_ref }} + woheller69/maps ${{ steps.up.outputs.wmaps_ref }} (Google Maps WebView) + Android-Mock-Location ${{ steps.up.outputs.mock_ref }}. Package: cgeo.geocaching.mockgps" \
             --latest
           # keep only the 5 newest releases
           gh release list --limit 100 --json tagName,createdAt \
@@ -140,7 +150,7 @@ jobs:
       - name: Open an issue if the patch or build broke
         if: failure()
         run: |
-          T="Build failed for c:geo ${{ steps.up.outputs.cgeo_tag }}"
+          T="Build failed for ${{ steps.up.outputs.tag }}"
           N=$(gh issue list --state open --search "\"$T\" in:title" --json number -q length)
           if [ "$N" = "0" ]; then
             gh issue create --title "$T" \
